@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<title>OrderBot</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: system-ui, sans-serif; margin: 0; background: #f5f6f8; color: #1d1d1f; }
+  header { padding: 16px 24px; background: #1d1d1f; color: #fff; }
+  header h1 { margin: 0; font-size: 20px; }
+  header p { margin: 4px 0 0; font-size: 13px; opacity: .7; }
+  main { display: grid; grid-template-columns: 1fr 1.4fr; gap: 20px; padding: 20px 24px; }
+  section { background: #fff; border-radius: 10px; padding: 16px; box-shadow: 0 1px 3px rgba(0,0,0,.08); }
+  h2 { font-size: 15px; margin: 0 0 12px; }
+  textarea { width: 100%; height: 260px; font: 14px/1.5 ui-monospace, monospace; padding: 10px; border: 1px solid #ccc; border-radius: 6px; }
+  button { background: #0a66ff; color: #fff; border: 0; border-radius: 6px; padding: 9px 16px; font-size: 14px; cursor: pointer; margin-top: 10px; }
+  button:disabled { opacity: .5; cursor: wait; }
+  button.secondary { background: #e8eaee; color: #1d1d1f; }
+  td button { margin: 0; padding: 4px 8px; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 12px; margin-bottom: 14px; }
+  label { font-size: 12px; color: #666; display: block; margin-bottom: 2px; }
+  input, select { width: 100%; padding: 6px 8px; border: 1px solid #ccc; border-radius: 5px; font-size: 14px; }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th, td { text-align: left; padding: 6px; border-bottom: 1px solid #eee; }
+  .alertes { list-style: none; padding: 0; margin: 14px 0 0; }
+  .alertes li { background: #fde8e8; color: #b42318; border-left: 4px solid #d92d20; padding: 8px 10px; margin-bottom: 6px; border-radius: 4px; font-size: 14px; }
+  .alertes li.ok { background: #e6f4ea; color: #067647; border-color: #12b76a; }
+  #status { font-size: 13px; color: #666; margin-left: 10px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>OrderBot</h1>
+  <p>Mail revendeur → commande structurée, vérifiée contre le catalogue. LLM 100 % local.</p>
+</header>
+<main>
+  <section>
+    <h2>1. Coller le mail</h2>
+    <textarea id="mail" placeholder="Bonjour, merci de nous envoyer…"></textarea>
+    <button id="btn-extract">Extraire la commande</button><span id="status"></span>
+  </section>
+
+  <section id="resultat" hidden>
+    <h2>2. Vérifier et corriger</h2>
+    <div class="grid">
+      <div><label>Revendeur</label><input id="revendeur"></div>
+      <div><label>Client final</label><input id="client"></div>
+      <div><label>Réf. commande</label><input id="ref_commande"></div>
+      <div><label>Date de livraison</label><input id="date_livraison" type="date"></div>
+    </div>
+    <table>
+      <thead><tr><th>SKU</th><th>Désignation</th><th>Qté</th><th>Prix HT</th><th></th></tr></thead>
+      <tbody id="lignes"></tbody>
+    </table>
+    <button class="secondary" id="btn-add">+ Ajouter une ligne</button>
+    <ul class="alertes" id="alertes"></ul>
+
+    <h2 style="margin-top:20px">3. Exporter</h2>
+    <button id="btn-csv">Télécharger le CSV (EDI)</button>
+  </section>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let catalogue = [];
+const catalogueReady = fetch("/catalogue").then(r => r.json()).then(c => catalogue = c);
+
+$("btn-extract").onclick = async () => {
+  const texte = $("mail").value.trim();
+  if (!texte) return;
+  $("btn-extract").disabled = true;
+  $("status").textContent = "Analyse en cours…";
+  try {
+    await catalogueReady;
+    const r = await fetch("/extract", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ texte }),
+    });
+    if (!r.ok) throw new Error((await r.json()).detail || r.statusText);
+    afficher(await r.json());
+    $("status").textContent = "";
+  } catch (e) {
+    $("status").textContent = "Erreur : " + e.message;
+  } finally {
+    $("btn-extract").disabled = false;
+  }
+};
+
+function afficher(cmd) {
+  for (const champ of ["revendeur", "client", "ref_commande", "date_livraison"]) {
+    $(champ).value = cmd[champ] ?? "";
+  }
+  $("lignes").innerHTML = "";
+  cmd.lignes.forEach(ajouterLigne);
+
+  $("alertes").innerHTML = "";
+  if (cmd.alertes.length === 0) {
+    const li = document.createElement("li");
+    li.className = "ok";
+    li.textContent = "Aucune alerte : toutes les références sont au catalogue.";
+    $("alertes").append(li);
+  }
+  for (const a of cmd.alertes) {
+    const li = document.createElement("li");
+    li.textContent = a;  // textContent, jamais innerHTML : l'alerte contient du texte venu du mail (XSS)
+    $("alertes").append(li);
+  }
+  $("resultat").hidden = false;
+}
+
+const cellule = (el) => { const td = document.createElement("td"); td.append(el); return td; };
+
+function ajouterLigne(l = {}) {
+  const tr = document.createElement("tr");
+  // Liste déroulante : on ne peut choisir qu'un SKU qui existe
+  const select = document.createElement("select");
+  for (const p of catalogue) select.add(new Option(p.sku, p.sku, false, p.sku === l.sku));
+  const desig = document.createElement("td");
+  const prix = document.createElement("td");
+  const maj = () => {
+    const p = catalogue.find(p => p.sku === select.value);
+    desig.textContent = p?.designation ?? "";
+    prix.textContent = p ? p.prix_ht + " €" : "";
+  };
+  select.onchange = maj;
+
+  const qte = document.createElement("input");
+  qte.type = "number"; qte.min = 1; qte.value = l.quantite ?? 1; qte.className = "qte";
+
+  const suppr = document.createElement("button");
+  suppr.textContent = "✕"; suppr.className = "secondary";
+  suppr.onclick = () => tr.remove();
+
+  tr.append(cellule(select), desig, cellule(qte), prix, cellule(suppr));
+  maj();
+  $("lignes").append(tr);
+}
+
+$("btn-add").onclick = () => ajouterLigne();
+
+$("btn-csv").onclick = () => {
+  const v = (id) => $(id).value;
+  const entete = ["ref_commande", "revendeur", "client", "date_livraison", "sku", "quantite", "prix_ht"];
+  const lignes = [...$("lignes").children].map(tr => {
+    const sku = tr.querySelector("select").value;
+    const p = catalogue.find(p => p.sku === sku);
+    return [v("ref_commande"), v("revendeur"), v("client"), v("date_livraison"),
+            sku, tr.querySelector(".qte").value, p.prix_ht];
+  });
+  const esc = (val) => {
+    let s = String(val ?? "");
+    if (/^[=+\-@]/.test(s)) s = "'" + s;      // anti injection de formule Excel
+    return `"${s.replaceAll('"', '""')}"`;
+  };
+  const csv = [entete, ...lignes].map(r => r.map(esc).join(";")).join("\r\n");
+  const blob = new Blob(["\ufeff" + csv], { type: "text/csv;charset=utf-8" });  // BOM : accents OK dans Excel
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = `commande_${v("ref_commande") || "sans-ref"}.csv`;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+};
+</script>
+</body>
+</html>
